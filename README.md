@@ -1,114 +1,115 @@
-# Jyce
+# Jyce.jl
 
-Jyce is the Julia package integration layer for the XyceSolver CxxWrap module.
+Jyce.jl provides seamless Julia bindings for Xyce, Sandia National Laboratories' high-performance, parallel circuit simulator. It leverages **XyceSolver** (a C++ wrapper around Xyce) to make running and analyzing circuit simulations incredibly easy directly from Julia.
 
-This repo currently includes a local `XyceSolver_jll` shim package for development.
-When a real artifact-backed `XyceSolver_jll` is published, replace the local source override in `Jyce/Project.toml`.
+With Jyce.jl, you get the rigor and physical modeling accuracy of Xyce combined with the ease of use, data science capabilities, and plotting ecosystem of Julia.
 
-## Current Native Loading Order
+## Why Jyce?
 
-Jyce resolves `xycesolver_julia` in this order:
+- **Easy to Use:** Load netlists from files or directly from Julia strings without touching command-line flags.
+- **Dynamic Programmatic Circuits:** Assemble circuits on the fly (adding custom models, components, `.SUBCKT`s) straight from your Julia scripts.
+- **Automated Plotting & Data Extraction:** Built-in utilities for automatically parsing Xyce output files (`.prn`), extracting IV curves, and plotting transient/AC results.
+- **Plugin Support:** Easily load and test compiled Verilog-A models directly into your simulator instances.
 
-1. Optional JLL products (if `XyceSolver_jll` is available and `JYCE_PREFER_JLL=1`)
-2. `JYCE_XYCESOLVER_JULIA_LIB` (absolute path to the module file)
-3. `JYCE_XYCESOLVER_ROOT/lib/xycesolver_julia.<ext>`
-4. `JYCE_XYCESOLVER_ROOT/build/xycesolver_julia.<ext>`
-5. `Jyce/lib/xycesolver_julia.<ext>`
-6. Monorepo fallback: `XyceSolver/build/xycesolver_julia.<ext>`
+---
 
-To disable JLL lookup completely:
+## Installation (Zero Configuration)
+
+If you already have Xyce installed on your system, setting up Jyce is completely automated. We have provided an `install.sh` script that finds your Julia installation, builds the XyceSolver C++ bridge, and sets up Jyce seamlessly.
+
+Simply run the installation script:
 
 ```bash
-export JYCE_PREFER_JLL=0
+cd /path/to/Jyce/Jyce.jl
+./install.sh
 ```
 
-## Development Workflow
+**What the script does:**
+1. Detects your Julia `CxxWrap` environment.
+2. Compiles the native `XyceSolver` module alongside `Jyce.jl`.
+3. Links the built native library so Jyce can find it with zero configuration.
+4. Instantiates the Julia package environment.
 
-1. Build native module from XyceSolver:
-
+If your Xyce and Trilinos libraries are installed in custom locations, you can export them before running the script:
 ```bash
-cd ../XyceSolver
-cmake -S . -B build -DBUILD_CXXWRAP_MODULE=ON -DXYCE_ROOT=$HOME/XyceInstall/Serial -DTRILINOS_ROOT=$HOME/XyceLibs/Serial -DCMAKE_PREFIX_PATH=$(julia -e 'using CxxWrap; print(CxxWrap.prefix_path())')
-cmake --build build -j
+export XYCE_ROOT=/custom/path/to/Xyce
+export TRILINOS_ROOT=/custom/path/to/Trilinos
+./install.sh
 ```
 
-2. Point Jyce at the build:
-
+### Smoke Test
+After installation, you can verify everything is working perfectly by running:
 ```bash
-export JYCE_XYCESOLVER_ROOT=/absolute/path/to/XyceSolver
-```
-
-3. Run Jyce tests:
-
-```bash
-cd ../Jyce
-julia --project -e 'using Pkg; Pkg.test()'
-```
-
-## Optional: Allow Missing Native Backend
-
-For CI or documentation jobs that should not fail when native binaries are missing:
-
-```bash
-export JYCE_ALLOW_MISSING_NATIVE=1
-```
-
-In this mode, Jyce imports without native bindings and `Jyce.native_available()` returns `false`.
-
-## Native Smoke Test (CI)
-
-Run a full native smoke verification (requires native module availability):
-
-```bash
-cd ../Jyce
 julia --project scripts/smoke_native.jl
 ```
 
-The script performs:
+---
 
-1. `Jyce.require_native!()`
-2. `XyceSimulator(false)` creation
-3. `loadNetlistString(...)` on a minimal transient netlist
-4. `runSimulation()` and success assertion
+## 💡 Quick Start Guide
 
-## Load-Stage Probe (No Simulation)
+Using Jyce in your Julia projects is incredibly straightforward. Here's a quick example of running a simple circuit and analyzing the results.
 
-Use this to isolate whether failures come from netlist loading vs simulation execution:
-
-```bash
-cd ../Jyce
-julia --project scripts/probe_load_stage.jl
-```
-
-If this probe succeeds but `scripts/smoke_native.jl` fails, the issue is in simulator initialization/run stage rather than `loadNetlistFile`/`loadNetlistString`.
-
-## Custom Subcircuits and Components
-
-Jyce supports programmatic custom circuit assembly for string-based netlists.
-
-You can add:
-
-1. `.include` files
-2. inline snippets such as `.MODEL` / `.PARAM`
-3. full `.SUBCKT ... .ENDS` definitions
-
-These custom definitions are automatically prepended whenever you call `loadNetlistString(...)`.
+### 1. Basic Simulation
 
 ```julia
 using Jyce
 
+# 1. Initialize the Simulator
 sim = Jyce.XyceSimulator()
 
-Jyce.add_include_file(sim, "./lib/reading/memristor.sub")
-Jyce.add_inline_snippet(sim, ".PARAM SCALE=1")
+# 2. Define your circuit netlist as a string
+netlist = """
+* Simple RC Circuit
+V1 in 0 DC 5
+R1 in out 1k
+C1 out 0 1u
+.TRAN 0.1u 5m
+.END
+"""
 
+# 3. Load and Run
+Jyce.loadNetlistString(sim, netlist)
+result = Jyce.runSimulation(sim)
+
+if !Jyce.simulation_success(result)
+    error("Simulation failed: ", Jyce.simulation_error_message(result))
+end
+
+println("Simulation finished successfully!")
+```
+
+### 2. Plotting the Results
+
+Jyce ships with built-in plotting utilities so you don't have to parse files manually.
+
+```julia
+# Get the path to the output `.prn` data generated by Xyce
+prn_file = Jyce.simulation_prn_file_path(result)
+
+# Automatically plot transient voltage signals
+Jyce.plot_transient_voltages(prn_file; 
+    nodes=["V(in)", "V(out)"], 
+    output_file="plots/rc_transient.png"
+)
+```
+
+---
+
+## 🛠️ Advanced Usage
+
+### Programmatic Circuit Construction
+Jyce allows you to inject snippets, includes, and custom subcircuits into your simulation dynamically before it runs.
+
+```julia
+# Add a component definition dynamically
 Jyce.register_subcircuit(sim, "rdivider", """
 .SUBCKT rdivider in out
-Rtop in out {SCALE*1k}
-Rbot out 0 {SCALE*2k}
+Rtop in out 1k
+Rbot out 0 2k
 .ENDS rdivider
 """)
 
+# Build your netlist using the dynamically registered subcircuit
 netlist = """
 V1 vin 0 DC 1
 X1 vin vout rdivider
@@ -118,99 +119,21 @@ X1 vin vout rdivider
 """
 
 Jyce.loadNetlistString(sim, netlist)
-result = Jyce.runSimulation(sim)
-
-if !Jyce.simulation_success(result)
-	error(Jyce.simulation_error_message(result))
-end
+Jyce.runSimulation(sim)
 ```
 
-To reset custom entries for a simulator instance:
+### Loading Custom Verilog-A Models
+If you compile Verilog-A models into Xyce plugins (`.so`), Jyce can load them directly:
 
 ```julia
-Jyce.clear_custom_components(sim)
+# Create a simulator instance and attach a plugin
+sim = Jyce.XyceSimulator()
+Jyce.add_plugin_library(sim, "/path/to/memristor_plugin.so")
+
+Jyce.loadNetlistString(sim, netlist_using_memristor)
+Jyce.runSimulation(sim)
 ```
 
-You can inspect the generated prelude text with:
-
-```julia
-println(Jyce.custom_components_prelude(sim))
-```
-
-Note: automatic prepend currently applies to `loadNetlistString(...)`. File-loaded netlists (`loadNetlistFile(...)`) keep their file content unchanged.
-
-## Utils: Data + Plotting
-
-Jyce now ships utility plotting/data helpers directly in the package, so users do not need to include files from `XyceSolver/graphic` manually.
-
-Available functions:
-
-1. `read_simulation_data(path)`
-2. `get_signal_names(data)`
-3. `get_plot_signals(data)`
-4. `detect_iv_columns(data_or_path)`
-5. `plot_transient_voltages(path; nodes=..., output_file=...)`
-6. `plot_iv_characteristic(path; voltage_col=..., current_col=..., output_file=...)`
-
-Example:
-
-```julia
-using Jyce
-
-result = Jyce.runSimulation(sim)
-prn = Jyce.simulation_prn_file_path(result)
-
-data = Jyce.read_simulation_data(prn)
-cols = Jyce.detect_iv_columns(data)
-println("Detected voltage column: ", cols.voltage_col)
-println("Detected current column: ", cols.current_col)
-
-Jyce.plot_transient_voltages(prn; nodes=["V(N001)"], output_file="plots/transient.png")
-Jyce.plot_iv_characteristic(
-	prn;
-	voltage_col=cols.voltage_col,
-	current_col=cols.current_col,
-	output_file="plots/iv.png",
-)
-```
-
-## Verilog-A Plugin: Memristor
-
-You can compile Verilog-A models into an Xyce plugin and load them from Jyce.
-
-Build example (this repository):
-
-```bash
-cd /home/daris/Documents/workspace/memristor_proj
-
-# 1) Convert Verilog-A to generated plugin project
-buildxyceplugin.sh -o memristor_plugin memristor-model.va Jyce/plugins
-
-# 2) Build generated project (explicit Xyce install path)
-cmake -S Jyce/plugins -B Jyce/plugins/build \
-	-DXYCE_INSTALL=/usr/local/XyceNF_7.10 \
-	-DPLUGIN_NAME=memristor_plugin
-cmake --build Jyce/plugins/build -j
-
-# 3) Optional convenience name without lib prefix
-cp Jyce/plugins/build/libmemristor_plugin.so Jyce/plugins/memristor_plugin.so
-```
-
-Load in Jyce:
-
-```julia
-using Jyce
-
-sim = Jyce.XyceSimulator(false)
-Jyce.add_plugin_library(sim, "/home/daris/Documents/workspace/memristor_proj/Jyce/plugins/memristor_plugin.so")
-
-# then load/run your circuit as usual
-Jyce.loadNetlistString(sim, netlist)
-result = Jyce.runSimulation(sim)
-```
-
-To reset plugin registrations on a simulator instance:
-
-```julia
-Jyce.clear_plugin_libraries(sim)
-```
+## Need Help?
+- Refer to `scripts/smoke_native.jl` for a complete end-to-end programmatic example.
+- If the simulation isn't working, you can use `scripts/probe_load_stage.jl` to help debug whether issues are occurring during the parsing stage or execution stage.
