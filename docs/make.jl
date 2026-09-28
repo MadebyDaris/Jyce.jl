@@ -13,10 +13,22 @@ using Jyce
 
 DocMeta.setdocmeta!(Jyce, :DocTestSetup, :(using Jyce); recursive = true)
 
-# Set JYCE_DOCS_REPO (e.g. "github.com/MadebyDaris/Jyce.jl") to enable the
-# "edit on GitHub" links and documentation deployment.  Without it the site
-# builds standalone, which also works in a clone that has no git remote.
-const REPO = get(ENV, "JYCE_DOCS_REPO", "")
+# Set JYCE_DOCS_REPO (e.g. "github.com/MadebyDaris/Jyce.jl") or rely on
+# GITHUB_REPOSITORY in CI to enable the "edit on GitHub" links and
+# documentation deployment. Without either value the site builds standalone,
+# which also works in a clone that has no git remote.
+const REPO = let
+    docs_repo = get(ENV, "JYCE_DOCS_REPO", "")
+    github_repo = get(ENV, "GITHUB_REPOSITORY", "")
+    if !isempty(docs_repo)
+        docs_repo
+    elseif !isempty(github_repo)
+        "github.com/" * github_repo
+    else
+        ""
+    end
+end
+const DEPLOY = !isempty(REPO) && get(ENV, "GITHUB_EVENT_NAME", "") != "pull_request"
 
 settings = (;
     modules = [Jyce],
@@ -49,7 +61,7 @@ settings = (;
     doctest = true,
 )
 
-if isempty(REPO)
+if !DEPLOY
     makedocs(; settings..., remotes = nothing)
 else
     makedocs(; settings..., repo = REPO)

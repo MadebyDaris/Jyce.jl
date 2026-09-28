@@ -78,3 +78,6 @@ in simulator initialisation rather than netlist parsing.
 Set `JYCE_ALLOW_MISSING_NATIVE=1` for jobs that build documentation or test
 netlist generation on machines without Xyce. The package imports, and
 [`native_available`](@ref) returns `false`.
+
+The repository includes `.github/workflows/Documenter.yml`, which builds the
+docs on pushes to `master` and publishes them to GitHub Pages.
