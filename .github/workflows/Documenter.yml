@@ -19,6 +19,22 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Create XyceSolver_jll stub
+        run: |
+          mkdir -p ../XyceSolver_jll/src
+          cat > ../XyceSolver_jll/Project.toml <<'EOF'
+          name = "XyceSolver_jll"
+          uuid = "7b6e6b8f-6a2f-4f9c-89d0-0d4b9f7a6e31"
+          version = "0.1.0"
+          EOF
+          cat > ../XyceSolver_jll/src/XyceSolver_jll.jl <<'EOF'
+          module XyceSolver_jll
+
+          export xycesolver_julia
+
+          end
+          EOF
+
       - name: Setup Julia
         uses: julia-actions/setup-julia@v2
         with:
