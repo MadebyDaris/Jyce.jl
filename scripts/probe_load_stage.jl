@@ -15,7 +15,7 @@ inline_netlist = """
 V1 1 0 DC 1
 R1 1 0 1k
 .op
-.print op V(1)
+.print dc V(1)
 .end
 """
 

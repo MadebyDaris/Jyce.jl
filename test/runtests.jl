@@ -68,3 +68,68 @@ end
     @test "V(N001)" in cols.available_columns
     @test "I(V1)" in cols.available_columns
 end
+
+@testset "Netlist generation" begin
+    # These run without the native backend: netlist text is pure Julia.
+    @test Jyce.node(:gnd) == "0"
+    @test Jyce.node(0) == "0"
+    @test Jyce.node(:out) == "out"
+
+    @test card(Resistor(:R1, :in, :out, 1e3)) == "R1 in out 1000"
+    @test card(Resistor(:load, :in, :out, "4k7")) == "Rload in out 4k7"
+    @test card(Capacitor(:C1, :out, :gnd, 1e-6; ic = 0.5)) == "C1 out 0 1e-06 IC=0.5"
+    @test card(VoltageSource(:V1, :in, :gnd, DC(0), AC(1))) == "V1 in 0 DC 0 AC 1 0"
+    @test card(Diode(:D1, :a, :b, :D1N4148)) == "D1 a b D1N4148"
+    @test card(SubcircuitCall(:X1, (:in, :out), :rdivider; scale = 2)) ==
+          "X1 in out rdivider PARAMS: scale=2"
+    @test card(PluginDevice(:m1, :MEMRISTOR, (:p, :n, :gnd), :mymem)) ==
+          "YMEMRISTOR m1 p n 0 mymem"
+
+    @test Jyce.waveform(Sine(0, 2.0, 1.0)) == "SIN(0 2 1 0 0 0)"
+    @test Jyce.waveform(PWL([(0.0, 0.0), (1e-3, 5.0)])) == "PWL(0 0 0.001 5)"
+
+    @test directive(DCSweep(:V1, 0, 5, 0.1)) == ".DC V1 0 5 0.1"
+    @test directive(ACSweep(1, 100e3; points = 20)) == ".AC DEC 20 1 100000"
+    @test directive(Transient(1e-3, 2.0)) == ".TRAN 0.001 2"
+
+    divider = Circuit(VoltageSource(:V1, :in, :gnd, DC(5)),
+                      Resistor(:R1, :in, :out, 1e3),
+                      Resistor(:R2, :out, :gnd, 2e3); title = "divider")
+    text = netlist(divider; analysis = OperatingPoint(), outputs = [:in, :out])
+    @test text == """
+    * divider
+    V1 in 0 DC 5
+    R1 in out 1000
+    R2 out 0 2000
+    .OP
+    .PRINT DC V(in) V(out)
+    .END
+    """
+    @test nodes(divider) == ["0", "in", "out"]
+    @test length(components(divider)) == 3
+
+    macro_ckt = @circuit "macro" begin
+        V1 = VoltageSource(:in, :gnd, DC(1))
+        R1 = Resistor(:in, :gnd, 1e3)
+        OperatingPoint()
+        voltage(:in)
+    end
+    @test occursin("V1 in 0 DC 1", netlist(macro_ckt))
+    @test occursin(".PRINT DC V(in)", netlist(macro_ckt))
+end
+
+@testset "Circuit validation" begin
+    bad = Circuit(VoltageSource(:V1, :in, :gnd, DC(1)),
+                  Resistor(:R1, :in, :out, :undeclared),
+                  Diode(:D1, :out, :gnd, :nosuchmodel))
+    issues = validate(bad; strict = false)
+    @test any(contains("undeclared"), issues)
+    @test any(contains("nosuchmodel"), issues)
+    @test_throws Jyce.CircuitValidationError validate(bad)
+
+    good = Circuit(VoltageSource(:V1, :in, :gnd, DC(1)),
+                   Resistor(:R1, :in, :out, :rload),
+                   Resistor(:R2, :out, :gnd, 1e3))
+    param!(good, :rload => 1e3)
+    @test isempty(validate(good; strict = false))
+end

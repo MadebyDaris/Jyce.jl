@@ -1,5 +1,6 @@
-using Pkg
-# Pkg.dev("../Jyce.jl")
+# Legacy-style example, kept working: a netlist string driven through the
+# original API.  See 02_rc_lowpass_ac.jl for the same circuit with the current
+# interface.
 using Jyce
 
 require_native!()
@@ -7,6 +8,7 @@ require_native!()
 sim = Jyce.XyceSimulator(false)
 
 custom_netlist = """
+* RC low-pass frequency response
 Vin input 0 AC 1
 
 * RC filter components

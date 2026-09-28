@@ -1,0 +1,6 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+Jyce = "9c416f61-a0af-48ab-ab57-3d574081f7a8"
+
+[compat]
+Documenter = "1"

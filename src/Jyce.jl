@@ -1,317 +1,122 @@
+"""
+    Jyce
+
+A Julia interface to the [Xyce](https://xyce.sandia.gov/) parallel electronic
+simulator.
+
+Jyce has three layers, and you can work at whichever one suits the task:
+
+1. **Circuits as Julia values** — build a [`Circuit`](@ref) from typed
+   components ([`Resistor`](@ref), [`VoltageSource`](@ref), ...), pick an
+   analysis ([`Transient`](@ref), [`ACSweep`](@ref), ...) and call
+   [`simulate`](@ref).
+2. **Netlists as text** — hand [`simulate`](@ref) a netlist string, or load a
+   `.cir` file with [`simulate_file`](@ref).  Everything Xyce accepts works,
+   including constructs Jyce does not model.
+3. **The native handle** — drive the C++ `XyceSimulator` directly when you need
+   something the wrapper does not expose.
+
+Results come back as a [`SimulationOutput`](@ref): a `DataFrame`-backed table
+with the netlist that produced it, ready for analysis, plotting or `CSV.write`.
+
+```julia
+using Jyce
+
+rc = @circuit "RC low-pass" begin
+    V1 = VoltageSource(:in, :gnd, DC(0), Pulse(0, 1; rise = 1e-6, width = 1e-3, period = 2e-3))
+    R1 = Resistor(:in, :out, 1e3)
+    C1 = Capacitor(:out, :gnd, 100e-9)
+end
+
+res = simulate(rc, Transient(1e-6, 4e-3); outputs = [:in, :out])
+plot(res)
+```
+
+Running simulations needs the native `xycesolver_julia` module; see
+[`native_available`](@ref) and [`print_native_diagnostics`](@ref).  Netlist
+generation works without it.
+"""
 module Jyce
 
 using CxxWrap
 using Libdl
+using Printf
 using CSV
 using DataFrames
+using Tables
 using Plots
 
-include("utils/graphics.jl")
+# Native backend (defines XyceSimulator, SimulationResult, SimulationData and
+# the wrapped C++ methods, or placeholder types when Xyce is unavailable).
+include("backend/native.jl")
 
-const XYCESOLVER_MODULE_ENV = "JYCE_XYCESOLVER_JULIA_LIB"
-const XYCESOLVER_ROOT_ENV = "JYCE_XYCESOLVER_ROOT"
-const XYCESOLVER_PREFER_JLL_ENV = "JYCE_PREFER_JLL"
-const XYCESOLVER_ALLOW_MISSING_ENV = "JYCE_ALLOW_MISSING_NATIVE"
+# Circuit description
+include("circuit/values.jl")
+include("circuit/sources.jl")
+include("circuit/components.jl")
+include("analysis/analyses.jl")
+include("circuit/circuit.jl")
 
-const XYCESOLVER_JLL_MODULES = (:XyceSolver_jll,)
-const XYCESOLVER_JLL_PRODUCTS = (:xycesolver_julia, :libxycesolver_julia)
+# Results
+include("io/readers.jl")
+include("io/signals.jl")
+include("io/results.jl")
 
-const _native_initialized = Ref(false)
-const _native_init_error = Ref{Union{Nothing,Exception}}(nothing)
+# Driving the simulator
+include("validate.jl")
+include("simulator.jl")
+include("definitions.jl")
+include("sweep.jl")
 
-_is_truthy(value::String) = value in ("1", "true", "TRUE", "yes", "YES", "on", "ON")
+# Visualisation and legacy API
+include("plotting.jl")
+include("compat.jl")
 
-function _extract_jll_product_path(value)
-	if value isa AbstractString
-		candidate = strip(String(value))
-		return isempty(candidate) ? nothing : candidate
-	end
+# --- native backend ---
+export native_available, native_error, require_native!, native_diagnostics,
+       print_native_diagnostics
 
-	if value isa Function
-		try
-			resolved = value()
-			if resolved isa AbstractString
-				candidate = strip(String(resolved))
-				return isempty(candidate) ? nothing : candidate
-			end
-		catch
-			return nothing
-		end
-	end
+# --- simulator ---
+export Simulator, XyceSimulator, SimulationResult
+export load!, load_file!, simulate, simulate_file
+export set_param!, clear_params!, add_plugin!, clear_plugins!, output_suffix!
+export last_error, debug_state, prn_path, export_csv, default_output_dir
+export register_subcircuit!, include_file!, snippet!, clear_definitions!, definitions_prelude
 
-	return nothing
-end
+# --- circuit description ---
+export Circuit, @circuit, netlist, add!, param!, include!, options!, ic!,
+       validate, CircuitValidationError,
+       output!, analysis!, plugin!, directive!, components, nodes, node
+export SpiceExpr, @expr_str, spice, card, designator, terminals
+export AbstractElement, AbstractComponent
+export Resistor, Capacitor, Inductor, MutualInductance
+export VoltageSource, CurrentSource, VCVS, VCCS, CCCS, CCVS, Behavioral, VoltageSwitch
+export Diode, BJT, MOSFET, JFET
+export SubcircuitCall, Subcircuit, Model, PluginDevice, RawCard
 
-function _jll_module_paths()
-	if !_is_truthy(get(ENV, XYCESOLVER_PREFER_JLL_ENV, "1"))
-		return String[]
-	end
+# --- sources ---
+export AbstractWaveform, DC, AC, Sine, Pulse, PWL, Exponential, SFFM, RawWaveform, waveform
 
-	paths = String[]
+# --- analyses and probes ---
+export AbstractAnalysis, OperatingPoint, DCSweep, ACSweep, Transient, Noise, RawAnalysis, Step
+export directive, print_tag, Probe, voltage, branch_current, power, vdb, vphase, vmag
 
-	for modsym in XYCESOLVER_JLL_MODULES
-		loaded_mod = nothing
-		try
-			@eval import $(modsym)
-			loaded_mod = getfield(@__MODULE__, modsym)
-		catch
-			continue
-		end
+# --- results ---
+export SimulationOutput, SimulationFailure, issuccess, signals, times
+export read_simulation_data, get_signal_names, get_time_vector, independent_column,
+       get_plot_signals,
+       get_voltage, get_current, detect_iv_columns
 
-		for product_sym in XYCESOLVER_JLL_PRODUCTS
-			if isdefined(loaded_mod, product_sym)
-				candidate = _extract_jll_product_path(getproperty(loaded_mod, product_sym))
-				if candidate !== nothing
-					push!(paths, candidate)
-				end
-			end
-		end
-	end
+# --- sweeps ---
+export sweep, SweepResult, outputs, points, failures
 
-	return unique(paths)
-end
+# --- plotting ---
+export plot_transient_voltages, plot_iv_characteristic, plot_bode
 
-function _candidate_module_paths()
-	module_name = "xycesolver_julia." * Libdl.dlext
-
-	candidates = String[]
-
-	append!(candidates, _jll_module_paths())
-
-	if haskey(ENV, XYCESOLVER_MODULE_ENV)
-		push!(candidates, ENV[XYCESOLVER_MODULE_ENV])
-	end
-
-	if haskey(ENV, XYCESOLVER_ROOT_ENV)
-		root = ENV[XYCESOLVER_ROOT_ENV]
-		push!(candidates, joinpath(root, "lib", module_name))
-		push!(candidates, joinpath(root, "build", module_name))
-	end
-
-	# Local package layout fallback: Jyce/lib/xycesolver_julia.<ext>
-	push!(candidates, joinpath(@__DIR__, "..", "lib", module_name))
-
-	# Monorepo fallback for active development.
-	push!(candidates, joinpath(@__DIR__, "..", "..", "XyceSolver", "build", module_name))
-
-	return unique(map(abspath, candidates))
-end
-
-function _resolve_xycesolver_module_path()
-	for path in _candidate_module_paths()
-		if isfile(path)
-			return path
-		end
-	end
-
-	searched = join(_candidate_module_paths(), "\n  - ")
-	error(
-		"Could not locate xycesolver_julia shared module.\n" *
-		"Set " * XYCESOLVER_MODULE_ENV * " to an absolute path, or " *
-		XYCESOLVER_ROOT_ENV * " to an installation root.\n" *
-		"Optional: provide XyceSolver_jll and keep " * XYCESOLVER_PREFER_JLL_ENV * "=1.\n" *
-		"Searched:\n  - " * searched,
-	)
-end
-
-const _wrapped_module_path = let
-	try
-		_resolve_xycesolver_module_path()
-	catch err
-		_native_init_error[] = err
-		nothing
-	end
-end
-
-const _native_wrapped = _wrapped_module_path !== nothing
-
-if _native_wrapped
-	@wrapmodule(() -> _wrapped_module_path, :define_julia_module)
-end
-
-function __init__()
-	if !_native_wrapped
-		if _is_truthy(get(ENV, XYCESOLVER_ALLOW_MISSING_ENV, ""))
-			@warn "Jyce native backend unavailable; continuing without native bindings." exception=(_native_init_error[], nothing)
-			return
-		end
-
-		err = _native_init_error[]
-		if err === nothing
-			error("Jyce native backend could not be initialized: module path unresolved.")
-		end
-		throw(err)
-	end
-
-	try
-		@initcxx
-		_native_initialized[] = true
-		_native_init_error[] = nothing
-	catch err
-		_native_initialized[] = false
-		_native_init_error[] = err
-		if _is_truthy(get(ENV, XYCESOLVER_ALLOW_MISSING_ENV, ""))
-			@warn "Jyce native backend unavailable; continuing without native bindings." exception=(err, catch_backtrace())
-		else
-			rethrow()
-		end
-	end
-end
-
-native_available() = _native_initialized[]
-
-function native_error()
-	return _native_init_error[]
-end
-
-function require_native!()
-	if native_available()
-		return nothing
-	end
-
-	err = native_error()
-	if err === nothing
-		error("Jyce native backend is not initialized.")
-	end
-
-	error(
-		"Jyce native backend is unavailable. " *
-		"Set " * XYCESOLVER_MODULE_ENV * " or " * XYCESOLVER_ROOT_ENV *
-		" to a valid build/install path. Inner error: " * sprint(showerror, err),
-	)
-end
-
-function native_diagnostics()
-	candidates = _candidate_module_paths()
-	existing = filter(isfile, candidates)
-
-	return (
-		native_available = native_available(),
-		native_wrapped = _native_wrapped,
-		wrapped_module_path = _wrapped_module_path,
-		native_error = native_error(),
-		env = (
-			xycesolver_module = get(ENV, XYCESOLVER_MODULE_ENV, nothing),
-			xycesolver_root = get(ENV, XYCESOLVER_ROOT_ENV, nothing),
-			prefer_jll = get(ENV, XYCESOLVER_PREFER_JLL_ENV, "1"),
-			allow_missing = get(ENV, XYCESOLVER_ALLOW_MISSING_ENV, ""),
-		),
-		candidate_paths = candidates,
-		existing_paths = existing,
-	)
-end
-
-function print_native_diagnostics(io::IO=stdout)
-	d = native_diagnostics()
-
-	println(io, "Jyce native diagnostics")
-	println(io, "  native_available: ", d.native_available)
-	println(io, "  native_wrapped: ", d.native_wrapped)
-	println(io, "  wrapped_module_path: ", d.wrapped_module_path)
-	println(io, "  env:")
-	println(io, "    ", XYCESOLVER_MODULE_ENV, "=", d.env.xycesolver_module)
-	println(io, "    ", XYCESOLVER_ROOT_ENV, "=", d.env.xycesolver_root)
-	println(io, "    ", XYCESOLVER_PREFER_JLL_ENV, "=", d.env.prefer_jll)
-	println(io, "    ", XYCESOLVER_ALLOW_MISSING_ENV, "=", d.env.allow_missing)
-	println(io, "  candidate_paths:")
-	for p in d.candidate_paths
-		println(io, "    - ", p)
-	end
-	println(io, "  existing_paths:")
-	for p in d.existing_paths
-		println(io, "    - ", p)
-	end
-	if d.native_error !== nothing
-		println(io, "  native_error: ", sprint(showerror, d.native_error))
-	end
-
-	return d
-end
-
-simulation_success(result) = success(result)
-simulation_error_message(result) = error_message(result)
-simulation_prn_file_path(result) = prn_file_path(result)
-
-function register_subcircuit(sim::XyceSimulator, name::String, definition::String)
-	registerSubcircuitDefinition(sim, name, definition)
-	return sim
-end
-
-function add_include_file(sim::XyceSimulator, filepath::String)
-	appendIncludeFile(sim, filepath)
-	return sim
-end
-
-function add_inline_snippet(sim::XyceSimulator, snippet::String)
-	appendInlineSnippet(sim, snippet)
-	return sim
-end
-
-function clear_custom_components(sim::XyceSimulator)
-	clearCustomDefinitions(sim)
-	return sim
-end
-
-custom_components_prelude(sim::XyceSimulator) = String(getCustomDefinitionsPrelude(sim))
-
-function add_plugin_library(sim::XyceSimulator, plugin_path::String)
-	addPluginLibrary(sim, plugin_path)
-	return sim
-end
-
-function clear_plugin_libraries(sim::XyceSimulator)
-	clearPluginLibraries(sim)
-	return sim
-end
-
-function run_simulation_data(sim::XyceSimulator; output_file::Union{Nothing,String}=nothing)
-	raw = output_file === nothing ? runSimulationData(sim) : runSimulationDataOutput(sim, output_file)
-	parameter_pairs_jl = String[String(x) for x in parameter_pairs(raw)]
-	plugin_libraries_jl = String[String(x) for x in plugin_libraries(raw)]
-	time_points_jl = Float64[Float64(x) for x in time_points(raw)]
-	node_names_jl = String[String(x) for x in node_names(raw)]
-	node_voltages_jl = Vector{Float64}[Float64[Float64(x) for x in row] for row in node_voltages(raw)]
-	return (
-		success = success(raw),
-		error_message = String(error_message(raw)),
-		prn_file_path = String(prn_file_path(raw)),
-		parameter_pairs = parameter_pairs_jl,
-		plugin_libraries = plugin_libraries_jl,
-		time_points = time_points_jl,
-		node_names = node_names_jl,
-		node_voltages = node_voltages_jl,
-	)
-end
-
-greet() = print("Jyce is ready.")
-
-export XyceSimulator
-export SimulationResult
-export native_available
-export native_error
-export require_native!
-export native_diagnostics
-export print_native_diagnostics
-export simulation_success
-export simulation_error_message
-export simulation_prn_file_path
-export register_subcircuit
-export add_include_file
-export add_inline_snippet
-export clear_custom_components
-export custom_components_prelude
-export add_plugin_library
-export clear_plugin_libraries
-export run_simulation_data
-export read_simulation_data
-export get_signal_names
-export get_time_vector
-export get_plot_signals
-export get_voltage
-export get_current
-export detect_iv_columns
-export plot_transient_voltages
-export plot_iv_characteristic
-export greet
+# --- legacy API (see src/compat.jl) ---
+export simulation_success, simulation_error_message, simulation_prn_file_path,
+       register_subcircuit, add_include_file, add_inline_snippet,
+       clear_custom_components, custom_components_prelude,
+       add_plugin_library, clear_plugin_libraries, run_simulation_data, greet
 
 end # module Jyce

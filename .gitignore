@@ -1,2 +1,11 @@
 /build
 /plugins/*
+/draft/
+# Documenter output
+/docs/build/
+/docs/Manifest.toml
+
+# Simulation outputs
+*.prn
+*.FD.prn
+*.NOISE.prn
